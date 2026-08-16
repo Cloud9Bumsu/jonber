@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0b0e14">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="존버">
+<title>존버 — 작전</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;height:100dvh;background:#0b0e14;overflow:hidden;
+    font-family:"Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+    -webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;
+    overscroll-behavior:none;touch-action:none}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+  canvas{display:block;touch-action:none;cursor:pointer}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<script>
+
+(()=>{
+"use strict";
+/* ══════════════════════════════════════════════════════════
+   존버 v2
+     · 자본 1억, 전량 매수/매도
+     · 조작할수록 세력이 붙는다 → 클릭은 약해지고 복원·출혈은 세진다
+     · 세력은 손 떼면 식는다 → 잠복이 전략이 된다
+     · 내 주문 자체가 주가를 움직인다 (시총 대비 비중)
+   ══════════════════════════════════════════════════════════ */
+
+const cv=document.getElementById("c"), ctx=cv.getContext("2d");
+let W=0,H=0,DPR=1,L={};
+function layout(){
+  const mob = W<760;
+  if(mob){
+    const headH=104, btnH=52, btnGap=8, statH=104, pad=10;
+    const btnBlock=btnH*2+btnGap;
+    L={mob:true, x:pad, w:W-pad*2-58,   // 우측 58px 은 가격 눈금·현재가 태그 자리
+       plotTop:headH, plotBot:H-(btnBlock+statH+pad*2+18),
+       axisY:H-(btnBlock+statH+pad*2),
+       statY:H-(btnBlock+statH+pad), statH:statH,
+       btnY:H-(btnBlock+pad), btnH:btnH, btnGap:btnGap, btnCols:2,
+       priceTagW:48, gutter:58, big:26, mid:15, sm:11};
+  }else{
+    const panelW=252, gut=116;
+    L={mob:false, x:20, w:W-panelW-gut,
+       plotTop:104, plotBot:H-120, axisY:H-104,
+       panelX:W-panelW-16, panelW:panelW,
+       btnY:H-58, btnH:40, btnGap:12, btnCols:4,
+       priceTagW:62, gutter:76, big:34, mid:20, sm:12};
+  }
+  L.right=L.x+L.w;
+}
+function resize(){
+  DPR=Math.min(devicePixelRatio||1,2);
+  W=Math.min(innerWidth,1120); H=Math.min(innerHeight,860);
+  cv.width=W*DPR;cv.height=H*DPR;cv.style.width=W+"px";cv.style.height=H+"px";
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  layout();
+}
+addEventListener("resize",resize); addEventListener("orientationchange",()=>setTimeout(resize,120));
+resize();
+
+/* ── 시장 ── */
+const PERIOD=2.4, MAXBARS=52;
+const IMPULSE=0.008, DAMP=0.055, RESTORE=2.1, STICK=0.60;
+const BLEED_HEAT=0.006;   // 하락압력은 오직 열기에서만 나온다 (열기 1.0 → 1%/초)
+const DRIFT=0.010;        // 방치 시 적정가 자체의 랜덤워크
+const NOISE=0.35, COMBO_W=0.38;
+/* 세력 저항 — 시뮬레이션으로 맞춘 값
+   광클 지속: +44% 고점을 18초에 찍고 이후 흘러내림 (안 팔면 -63%)
+   손 떼면 열기가 35초에 걸쳐 빠진다
+   방치하면 하락압력이 0 → 그냥 랜덤워크 (6분 뒤 대략 1.0만~1.7만)
+   6분 기준: 사이클 3.1억 / 존버 1.1억 / 무행동 1.0억 / 무지성클릭 0.27억 */
+const HEAT_CLICK=0.003;   // 클릭 1회당 유입
+const HEAT_GAP  =0.30;    // 적정가 대비 괴리에 비례해 유입
+const HEAT_COOL =0.045;   // 냉각 계수 — 손을 떼야만 빠진다
+const COOL_B=0.8, COOL_S=0.9;   // 이탈속도 = HEAT_COOL*(COOL_B + heat*COOL_S)
+const HEAT_IDLE =1.2;     // 이 시간 이상 안 눌러야 냉각 시작
+const HMAX=3.2;
+const K_RESTORE=0.6, K_IMPULSE=3.0;
+/* 세력 저지선: 적정가 대비 괴리에 스프링 저항이 걸린다.
+   광클은 그대로 허용 — 순간 고점은 오히려 더 높다(뽕맛).
+   다만 과열되면 클릭 효율이 급락해 결국 어떤 속도로도 천장을 만난다.
+     8클릭/초  → 고점 +28% @36초, 계속 누르면 150초에 -55%
+    30클릭/초  → 고점 +44% @18초, 계속 누르면 150초에 -63%
+    60클릭/초  → 고점 +41% @12초
+   과열 상태(열기 3.2)의 클릭 효율은 10% — 눌러봐야 소용없다. */
+const GAP_MAX=0.14, GAP_K=1.5, WALL=25;
+/* 종목 */
+const TICKER="멘비디아", CODE="045210", SHARES_OUT=1200000;
+const FEE_BUY=0.00015, FEE_SELL=0.00015, TAX=0.0018;
+const IMPACT=1.5;         // 주문금액/시총 대비 체결 충격 배수
+const START_CASH=1e8, BUST=1e6;
+/* 자동매수봇 — 9천만을 모아야 살 수 있다.
+   상시 가동하면 열기가 절대 안 식으므로 켜고 끄는 판단이 핵심이 된다. */
+const BOT_COST=9e7, BOT_CPS=5;
+/* 각성제 — 무료. 10초간 모든 클릭(손 + 봇) 파워 10배, 이후 10초 재사용 대기. */
+const POT_MULT=10, POT_DUR=10, POT_CD=10;
+
+const UP=["존버 성공","익절은 예술","오늘 내가 워런","형들 나 좀 함","불장이다"];
+const DN=["물타기 각","이건 조정임","계좌 안 봄","장기투자니까","세력이 흔든다"];
+
+/* ── 자동 저장 ──
+   아티팩트 미리보기에서는 localStorage 가 막혀 있어 조용히 넘어간다.
+   실제 웹에 올리면 정상 작동한다. */
+const SAVE_KEY="jonber_v1";
+let saveOK=true, saveT=0;
+function save(){
+  if(!saveOK) return;
+  try{
+    localStorage.setItem(SAVE_KEY,JSON.stringify({
+      v:1,p:G.p,p0:G.p0,fair:G.fair,vel:G.v,t:G.t,ct:G.ct,
+      open:G.open,hi:G.hi,lo:G.lo,bars:G.bars.slice(-MAXBARS),
+      heat:G.heat,cash:G.cash,sh:G.sh,avg:G.avg,hp:G.hp,
+      peak:G.peak,bust:G.bust,trades:G.trades,
+      bot:G.bot,botOn:G.botOn,pot:G.pot,potCd:G.potCd,pots:G.pots,
+      lo_v:G.lo_v,hi_v:G.hi_v
+    }));
+  }catch(e){ saveOK=false; }
+}
+function load(){
+  try{
+    const raw=localStorage.getItem(SAVE_KEY);
+    if(!raw) return false;
+    const d=JSON.parse(raw);
+    if(!d||d.v!==1||!isFinite(d.p)||!isFinite(d.cash)) return false;
+    Object.assign(G,{p:d.p,p0:d.p0,fair:d.fair,v:d.vel,t:d.t,ct:d.ct,
+      open:d.open,hi:d.hi,lo:d.lo,bars:Array.isArray(d.bars)?d.bars:[],
+      heat:d.heat,cash:d.cash,sh:d.sh,avg:d.avg,hp:d.hp,
+      peak:d.peak,bust:d.bust,trades:d.trades,
+      bot:d.bot,botOn:d.botOn,pot:d.pot,potCd:d.potCd,pots:d.pots,
+      lo_v:d.lo_v,hi_v:d.hi_v});
+    G.lastClick=G.t-99;
+    return true;
+  }catch(e){ saveOK=false; return false; }
+}
+function wipe(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
+
+let G;
+function reset(){
+  const p0=12500;
+  G={p:p0,p0:p0,fair:p0,v:0,t:0,ct:0,open:p0,hi:p0,lo:p0,
+     bars:[],rings:[],pops:[],flash:0,shake:0,
+     streak:0,lastClick:-9,combo:1,cpsBuf:[],cps:0,
+     heat:0, cash:START_CASH, sh:0, avg:0,
+     lo_v:p0*0.9,hi_v:p0*1.1, peak:START_CASH, msg:"",msgT:0,
+     bust:false, trades:0, bot:false, botOn:false, botAcc:0, pot:0, potCd:0, pots:0};
+}
+reset();
+function newGame(){ reset(); wipe(); }
+const asset=()=>G.cash+G.sh*G.p;
+
+/* 어떤 이유로든 수치가 깨지면 즉시 복구하고 무엇이 깨졌는지 남긴다 */
+const SANE={p:12500,p0:12500,fair:12500,v:0,t:0,ct:0,open:12500,hi:12500,lo:12500,
+  flash:0,shake:0,streak:0,lastClick:-9,combo:1,cps:0,heat:0,
+  cash:START_CASH,sh:0,avg:0,pot:0,potCd:0,lo_v:11250,hi_v:13750,peak:START_CASH,msgT:0,trades:0,botAcc:0,pot:0,potCd:0,pots:0};
+let brokeField="";
+function sanitize(){
+  for(const k in SANE){
+    const v=G[k];
+    if(typeof v!=="number"||!isFinite(v)){
+      if(!brokeField){brokeField=k+"="+String(v);console.error("복구:",k,v)}
+      G[k]=SANE[k];
+    }
+  }
+  if(G.p<10) G.p=10;
+  if(G.fair<10) G.fair=10;
+  if(G.hi_v-G.lo_v<1){G.lo_v=G.p*0.95;G.hi_v=G.p*1.05}
+  if(G.sh<0) G.sh=0;
+  if(G.cash<0) G.cash=0;
+}
+const won=(n)=>Math.round(n).toLocaleString("ko-KR");
+const clock=(sec)=>{const m=Math.floor(sec/60),x=Math.floor(sec%60);
+  return m+":"+String(x).padStart(2,"0")};
+function money(n){
+  const a=Math.abs(n);
+  if(a>=1e8) return (n/1e8).toFixed(2)+"억";
+  if(a>=1e4) return Math.round(n/1e4).toLocaleString()+"만";
+  return won(n);
+}
+
+/* ── 매매 ── */
+function impactOf(value){ return Math.min(0.25, value/(G.p*SHARES_OUT)*IMPACT); }
+function buyAll(){
+  if(G.bust||G.sh>0||G.cash<G.p) return;
+  const imp=impactOf(G.cash);
+  const fill=G.p*(1+imp/2);
+  const n=Math.floor(G.cash/(fill*(1+FEE_BUY)));
+  if(n<1) return;
+  const cost=n*fill*(1+FEE_BUY);
+  G.cash-=cost; G.sh=n; G.avg=cost/n;
+  G.p*=(1+imp); G.fair*=(1+imp*0.6); G.v+=G.p*0.02;
+  G.heat+=imp*1.2;
+  G.pops.push({x:L.x+L.w*0.5,y:(L.plotTop+L.plotBot)*0.45,age:0,txt:"매수 "+won(n)+"주",c:"#ff7a7a",big:1});
+  G.flash=0.35; G.trades++;
+}
+function sellAll(){
+  if(G.bust||G.sh<1) return;
+  const val=G.sh*G.p, imp=impactOf(val);
+  const fill=G.p*(1-imp/2);
+  const gross=G.sh*fill, net=gross*(1-FEE_SELL-TAX);
+  const pl=net-G.avg*G.sh;
+  G.cash+=net; G.sh=0;
+  G.p*=(1-imp); G.fair*=(1-imp*0.6); G.v-=G.p*0.02;
+  G.heat+=imp*1.6;
+  G.pops.push({x:L.x+L.w*0.5,y:(L.plotTop+L.plotBot)*0.45,age:0,
+    txt:(pl>=0?"+":"")+money(pl),c:pl>=0?"#ff7a7a":"#5a9dff",big:1});
+  G.msg=pl>=0?"익절 완료":"손절 완료"; G.msgT=2.4;
+  G.flash=0.35; G.shake=pl>=0?7:4; G.trades++;
+  G.peak=Math.max(G.peak,asset());
+}
+
+function buyBot(){
+  if(G.bust||G.bot||G.cash<BOT_COST) return;
+  G.cash-=BOT_COST; G.bot=true; G.botOn=true;
+  G.msg="자동매수봇 가동"; G.msgT=2.6; G.flash=0.4;
+  G.pops.push({x:L.x+L.w*0.5,y:(L.plotTop+L.plotBot)*0.45,age:0,txt:"자동매수봇 구매",c:"#ffc247",big:1});
+}
+function toggleBot(){ if(G.bot&&!G.bust) G.botOn=!G.botOn; }
+function drink(){
+  if(G.bust||G.pot>0||G.potCd>0) return;
+  G.pot=POT_DUR; G.pots++;
+  G.flash=0.5; G.shake=8;
+  G.msg="각성제 투여"; G.msgT=2.4;
+  G.pops.push({x:L.x+L.w*0.5,y:(L.plotTop+L.plotBot)*0.42,age:0,txt:"×"+POT_MULT+"  손 + 봇 전부",c:"#b56bff",big:1});
+}
+
+/* ── 입력 ── */
+const BTN=()=>{
+  const b3 = G.bot ? (G.botOn?"자동봇 ON":"자동봇 OFF") : "자동봇 "+money(BOT_COST);
+  const b4 = G.pot>0 ? "각성제 "+G.pot.toFixed(1)+"초"
+           : G.potCd>0 ? "대기 "+G.potCd.toFixed(1)+"초"
+           : "각성제 ×"+POT_MULT;
+  const keys=[["전량 매수","buy"],["전량 매도","sell"],[b3,"bot"],[b4,"pot"]];
+  const cols=L.btnCols, full=L.mob?W-L.x*2:L.w;
+  const bw=(full-L.btnGap*(cols-1))/cols;
+  return keys.map(([label,key],i)=>({
+    x:L.x+(i%cols)*(bw+L.btnGap),
+    y:L.btnY+Math.floor(i/cols)*(L.btnH+L.btnGap),
+    w:bw,h:L.btnH,label,key}));
+};
+const inChart=(x,y)=>x>=L.x-6&&x<=L.right+L.gutter&&y>=L.plotTop-40&&y<=L.plotBot+10;
+function pump(x,y){
+  if(G.bust) return;
+  const eff=IMPULSE/(1+G.heat*K_IMPULSE)*(G.pot>0?POT_MULT:1);
+  G.v+=G.p*eff*G.combo;
+  G.streak=(G.t-G.lastClick<COMBO_W)?Math.min(G.streak+1,24):0;
+  G.lastClick=G.t; G.cpsBuf.push(G.t);
+  G.heat=Math.min(HMAX,G.heat+HEAT_CLICK);
+  G.rings.push({x,y,age:0,pot:G.pot>0});
+  G.pops.push({x,y:y-12,age:0,txt:"+"+won(G.p*eff*G.combo),c:G.pot>0?"#c98bff":"#ff7a7a",big:0});
+}
+function tap(x,y){
+  for(const b of BTN()) if(x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h){
+    if(b.key==="buy") buyAll();
+    else if(b.key==="sell") sellAll();
+    else if(b.key==="bot") G.bot?toggleBot():buyBot();
+    else drink();
+    return;
+  }
+  if(G.bust){ const n=Date.now(); if(n-lastTapT<400) newGame(); lastTapT=n; return; }
+  if(inChart(x,y)) pump(x,y);
+}
+function pos(e){const r=cv.getBoundingClientRect(),q=e.touches?e.touches[0]:e;
+  return [q.clientX-r.left,q.clientY-r.top]}
+cv.addEventListener("mousedown",e=>{const[x,y]=pos(e);tap(x,y)});
+cv.addEventListener("touchstart",e=>{const r=cv.getBoundingClientRect();
+  for(const t of e.changedTouches) tap(t.clientX-r.left,t.clientY-r.top);
+  e.preventDefault()},{passive:false});
+addEventListener("keydown",e=>{
+  const k=e.key.toLowerCase();
+  if(e.code==="Space"){e.preventDefault(); pump(L.x+L.w*0.62,(L.plotTop+L.plotBot)/2)}
+  if(k==="b") buyAll();
+  if(k==="s") sellAll();
+  if(k==="a") G.bot?toggleBot():buyBot();
+  if(k==="d") drink();
+  if(k==="r") newGame();
+});
+
+/* ── 갱신 ── */
+function update(dt){
+  if(!isFinite(dt)||dt<=0) dt=1/60;
+  sanitize();
+  saveT+=dt; if(saveT>3){saveT=0;save()}
+  G.t+=dt; G.ct+=dt; G.msgT=Math.max(0,G.msgT-dt);
+  G.flash=Math.max(0,G.flash-dt*2.4); G.shake*=Math.pow(0.002,dt);
+  if(G.pot>0){ G.pot-=dt; if(G.pot<=0){G.pot=0; G.potCd=POT_CD;} }
+  else if(G.potCd>0) G.potCd=Math.max(0,G.potCd-dt);
+  G.combo=1+G.streak*0.055;
+  if(G.t-G.lastClick>COMBO_W) G.streak=Math.max(0,G.streak-dt*22);
+  G.cpsBuf=G.cpsBuf.filter(x=>G.t-x<1);
+  G.cps+=(G.cpsBuf.length-G.cps)*Math.min(1,dt*6);
+  if(G.bot&&G.botOn&&!G.bust){                      // 자동매수봇
+    G.botAcc+=dt;
+    let n=0;
+    while(G.botAcc>=1/BOT_CPS&&n<8){
+      G.botAcc-=1/BOT_CPS; n++;
+      pump(L.x+L.w*(0.25+Math.random()*0.5),
+           L.plotTop+(L.plotBot-L.plotTop)*(0.2+Math.random()*0.6));
+    }
+  }
+
+  if(!G.bust){
+    // 세력: 괴리가 클수록 몰려들고, 손 떼면 식는다
+    const gap=Math.max(0,G.p/G.fair-1);
+    G.heat+=gap*HEAT_GAP*dt;
+    if(G.t-G.lastClick>HEAT_IDLE)
+      G.heat-=HEAT_COOL*(COOL_B+G.heat*COOL_S)*dt;        // 손을 떼야 식는다
+    G.heat=Math.max(0,Math.min(HMAX,G.heat));
+
+    const res=RESTORE*(1+G.heat*K_RESTORE);
+    const bld=BLEED_HEAT*G.heat;      // 내가 만든 열기가 곧 갚아야 할 빚
+    const wall=G.fair*(1+GAP_MAX/(1+G.heat*GAP_K));      // 세력 저지선
+    if(G.p>wall) G.v-=(G.p-wall)*WALL*dt;
+    G.v+=(G.fair-G.p)*res*dt;
+    G.v+=(Math.random()-0.5)*G.p*NOISE*Math.sqrt(dt);
+    G.v*=Math.pow(DAMP,dt);
+    G.p+=G.v*dt;
+    G.fair+=(G.p-G.fair)*STICK*dt;
+    G.fair*=(1-bld*dt);
+    G.fair+=(Math.random()-0.5)*G.fair*DRIFT*Math.sqrt(dt);
+    if(G.p<10){G.p=10;G.v=Math.max(0,G.v)}
+    G.hi=Math.max(G.hi,G.p); G.lo=Math.min(G.lo,G.p);
+    G.peak=Math.max(G.peak,asset());
+    if(asset()<BUST&&G.sh===0) G.bust=true;
+  }
+
+  if(G.ct>=PERIOD){
+    G.ct-=PERIOD;
+    const b={o:G.open,c:G.p,h:G.hi,l:G.lo,t:G.t};
+    if(![b.o,b.c,b.h,b.l,b.t].every(isFinite)) { G.open=G.p;G.hi=G.p;G.lo=G.p; return; }
+    G.bars.push(b); if(G.bars.length>MAXBARS) G.bars.shift();
+    const r=(b.c-b.o)/b.o;
+    if(Math.abs(r)>0.022&&G.msgT<=0){
+      const L=r>0?UP:DN; G.msg=L[Math.floor(Math.random()*L.length)]; G.msgT=2.0;
+    }
+    G.open=G.p; G.hi=G.p; G.lo=G.p;
+  }
+
+  for(const r of G.rings) r.age+=dt;
+  G.rings=G.rings.filter(r=>r.age<0.45);
+  for(const p of G.pops){p.age+=dt;p.y-=(p.big?30:42)*dt}
+  G.pops=G.pops.filter(p=>p.age<(p.big?1.3:0.7));
+
+  let mn=Math.min(G.lo,G.p), mx=Math.max(G.hi,G.p);
+  for(const b of G.bars){mn=Math.min(mn,b.l);mx=Math.max(mx,b.h)}
+  if(G.sh>0){mn=Math.min(mn,G.avg);mx=Math.max(mx,G.avg)}
+  const pad=(mx-mn)*0.16+G.p*0.004;
+  const k=1-Math.pow(0.008,dt);
+  G.lo_v+=(mn-pad-G.lo_v)*k; G.hi_v+=(mx+pad-G.hi_v)*k;
+}
+
+
+/* ── 그리기 ── */
+const yOf=(p)=>L.plotTop+(L.plotBot-L.plotTop)*(1-(p-G.lo_v)/Math.max(1e-9,G.hi_v-G.lo_v));
+
+function draw(){
+  ctx.fillStyle="#0b0e14"; ctx.fillRect(0,0,W,H);
+  ctx.save();
+  if(G.shake>0.3) ctx.translate((Math.random()-.5)*G.shake,(Math.random()-.5)*G.shake);
+  chart();
+  ctx.restore();
+  header();
+  if(L.mob) statsMobile(); else panel();
+  buttons();
+  if(G.flash>0){ctx.fillStyle="#fff";ctx.globalAlpha=G.flash*0.16;ctx.fillRect(0,0,W,H);ctx.globalAlpha=1}
+  if(G.bust) bustScreen();
+}
+
+function bar(x,bw,o,c,h,l,al,live){
+  const up=c>=o, col=up?"#ff4d4d":"#3d7dff";
+  const yo=yOf(o),yc=yOf(c),yh=yOf(h),yl=yOf(l);
+  ctx.globalAlpha=al; ctx.strokeStyle=col; ctx.lineWidth=1.4;
+  ctx.beginPath(); ctx.moveTo(x+bw/2,yh); ctx.lineTo(x+bw/2,yl); ctx.stroke();
+  const top=Math.min(yo,yc), hg=Math.max(1.5,Math.abs(yc-yo));
+  if(up){ctx.fillStyle=col;ctx.fillRect(x,top,bw,hg)}
+  else{ctx.fillStyle="#0b0e14";ctx.fillRect(x,top,bw,hg);ctx.strokeRect(x+.7,top+.7,bw-1.4,hg-1.4)}
+  if(live){ctx.globalAlpha=0.3+0.25*Math.sin(G.t*7);ctx.strokeStyle=col;ctx.lineWidth=1;
+    ctx.strokeRect(x-2.5,top-2.5,bw+5,hg+5)}
+  ctx.globalAlpha=1;
+}
+
+function chart(){
+  const right=L.right-14;
+  const bw=Math.max(4,Math.min(14,(L.w-30)/(MAXBARS+2)));
+  const step=bw+Math.max(2,bw*0.3);
+
+  // 가격 눈금
+  ctx.font="500 "+(L.mob?9:10)+"px ui-monospace,Menlo,monospace"; ctx.textAlign="left";
+  const span=G.hi_v-G.lo_v, raw=span/(L.mob?4:5), mag=Math.pow(10,Math.floor(Math.log10(raw)));
+  const sp=[1,2,2.5,5,10].map(m=>m*mag).find(v=>v>=raw)||mag*10;
+  for(let p=Math.ceil(G.lo_v/sp)*sp;p<G.hi_v;p+=sp){
+    const y=yOf(p);
+    ctx.strokeStyle="#ffffff09"; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(L.x,y); ctx.lineTo(right+8,y); ctx.stroke();
+    ctx.fillStyle="#39414f"; ctx.fillText(won(p),right+14,y+3);
+  }
+  // 평단
+  if(G.sh>0){
+    const y=yOf(G.avg);
+    ctx.setLineDash([6,4]); ctx.strokeStyle="#ffc24788"; ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.moveTo(L.x,y); ctx.lineTo(right+8,y); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle="#ffc247"; ctx.font="600 "+(L.mob?9:10)+"px ui-monospace,monospace";
+    ctx.fillText("평단 "+won(G.avg),L.x+4,y-6);
+  }
+  // 봉
+  const n=G.bars.length;
+  for(let i=0;i<n;i++){
+    const x=right-(n-i)*step;
+    if(x<L.x-2) continue;
+    const b=G.bars[i]; bar(x,bw,b.o,b.c,b.h,b.l,0.9,false);
+  }
+  bar(right-bw,bw,G.open,G.p,G.hi,G.lo,1,true);
+
+  // 시간축
+  ctx.strokeStyle="#ffffff0d"; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(L.x,L.plotBot+2); ctx.lineTo(right+8,L.plotBot+2); ctx.stroke();
+  ctx.textAlign="center"; ctx.font="500 9px ui-monospace,monospace";
+  const every=Math.max(4,Math.round((L.mob?90:70)/step));
+  for(let i=n-1;i>=0;i-=every){
+    const x=right-(n-i)*step+bw/2;
+    if(x<L.x+4) break;
+    if(x>right-bw/2-46) continue;
+    ctx.strokeStyle="#ffffff14"; ctx.beginPath();
+    ctx.moveTo(x,L.plotBot+2); ctx.lineTo(x,L.plotBot+7); ctx.stroke();
+    ctx.fillStyle="#39414f"; ctx.fillText(clock(G.bars[i].t),x,L.plotBot+18);
+  }
+  ctx.strokeStyle="#ffffff2a"; ctx.beginPath();
+  ctx.moveTo(right-bw/2,L.plotBot+2); ctx.lineTo(right-bw/2,L.plotBot+8); ctx.stroke();
+  ctx.fillStyle="#5c6577"; ctx.fillText("지금",right-bw/2,L.plotBot+18);
+
+  // 고·저
+  let hiB=null,loB=null,hiX=0,loX=0;
+  for(let i=0;i<n;i++){
+    const x=right-(n-i)*step+bw/2;
+    if(x<L.x) continue;
+    if(!hiB||G.bars[i].h>hiB.h){hiB=G.bars[i];hiX=x}
+    if(!loB||G.bars[i].l<loB.l){loB=G.bars[i];loX=x}
+  }
+  if(G.hi>=(hiB?hiB.h:0)){hiB={h:G.hi};hiX=right-bw/2}
+  if(G.lo<=(loB?loB.l:1e18)){loB={l:G.lo};loX=right-bw/2}
+  ctx.textAlign="center"; ctx.font="600 "+(L.mob?9:10)+"px ui-monospace,monospace";
+  if(hiB){const yy=yOf(hiB.h); ctx.fillStyle="#ff8a8a"; ctx.fillText("▲ "+won(hiB.h),hiX,yy-9)}
+  if(loB){const yy=yOf(loB.l); ctx.fillStyle="#7fb0ff"; ctx.fillText("▼ "+won(loB.l),loX,yy+17)}
+
+  // 세력 저지선
+  if(G.heat>0.15){
+    const wy=yOf(G.fair*(1+GAP_MAX/(1+G.heat*GAP_K)));
+    if(wy>L.plotTop-10&&wy<L.plotBot+10){
+      ctx.setLineDash([2,4]); ctx.strokeStyle="#ffc24766"; ctx.lineWidth=1.2;
+      ctx.beginPath(); ctx.moveTo(L.x,wy); ctx.lineTo(right,wy); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle="#ffc247"; ctx.textAlign="left";
+      ctx.font="600 "+(L.mob?9:10)+"px ui-monospace,monospace";
+      ctx.fillText("세력 저지선",L.x+4,wy-5);
+    }
+  }
+  // 현재가
+  const y=yOf(G.p), pc=G.p>=G.open?"#ff5a5a":"#4d8dff";
+  ctx.setLineDash([4,5]); ctx.strokeStyle=pc+"55"; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(L.x,y); ctx.lineTo(right,y); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle=pc; ctx.fillRect(right+8,y-9,L.priceTagW,18);
+  ctx.fillStyle="#0b0e14"; ctx.textAlign="center"; ctx.font="700 11px ui-monospace,monospace";
+  ctx.fillText(won(G.p),right+8+L.priceTagW/2,y+4);
+
+  // 각성제 / 봇 상태
+  if(G.pot>0){
+    ctx.save(); ctx.globalAlpha=0.10+0.06*Math.sin(G.t*14);
+    ctx.fillStyle="#b56bff"; ctx.fillRect(0,0,W,H); ctx.restore();
+    ctx.textAlign="center"; ctx.fillStyle="#d3a8ff"; ctx.globalAlpha=0.85;
+    ctx.font="800 "+(L.mob?24:30)+"px 'Pretendard',sans-serif";
+    ctx.fillText("×"+POT_MULT+"   "+G.pot.toFixed(1)+"초",L.x+L.w/2,L.plotTop+40);
+    ctx.globalAlpha=1;
+  }
+  if(G.bot&&G.botOn){
+    ctx.textAlign="left"; ctx.fillStyle="#ffc247";
+    ctx.globalAlpha=0.55+0.35*Math.sin(G.t*5);
+    ctx.font="700 11px 'Pretendard',sans-serif";
+    ctx.fillText("● 자동봇 가동",L.x+4,L.plotTop+14); ctx.globalAlpha=1;
+  }
+  // 이펙트
+  for(const r of G.rings){
+    const a=1-r.age/0.45; ctx.globalAlpha=a*0.75;
+    ctx.strokeStyle=r.pot?"#b56bff":"#ff5a5a"; ctx.lineWidth=(r.pot?3.5:2)*a+0.5;
+    ctx.beginPath(); ctx.arc(r.x,r.y,10+r.age*(r.pot?150:90),0,7); ctx.stroke();
+  }
+  ctx.globalAlpha=1; ctx.textAlign="center";
+  for(const p of G.pops){
+    ctx.globalAlpha=Math.max(0,1-p.age/(p.big?1.3:0.7)); ctx.fillStyle=p.c;
+    ctx.font=(p.big?"800 "+(L.mob?20:26)+"px 'Pretendard',sans-serif":"700 13px ui-monospace,monospace");
+    ctx.fillText(p.txt,p.x,p.y);
+  }
+  ctx.globalAlpha=1;
+}
+
+function header(){
+  const diff=G.p-G.p0, rate=diff/G.p0*100, col=rate>=0?"#ff5a5a":"#4d8dff";
+  ctx.textAlign="left"; ctx.textBaseline="alphabetic";
+  ctx.fillStyle="#e8ecf4"; ctx.font="700 "+(L.mob?17:20)+"px 'Pretendard',sans-serif";
+  ctx.fillText(TICKER,L.x,L.mob?28:34);
+  const tw=ctx.measureText(TICKER).width;
+  ctx.fillStyle="#39414f"; ctx.font="500 10px ui-monospace,monospace";
+  ctx.fillText(CODE,L.x+tw+10,L.mob?28:34);
+  ctx.textAlign="right"; ctx.fillText("경과 "+clock(G.t),L.mob?W-L.x:L.x+L.w,L.mob?28:34);
+
+  ctx.textAlign="left"; ctx.fillStyle=col;
+  ctx.font="700 "+L.big+"px ui-monospace,monospace";
+  const pw=ctx.measureText(won(G.p)).width;
+  ctx.fillText(won(G.p),L.x,L.mob?64:72);
+  ctx.font="600 "+(L.mob?12:13)+"px ui-monospace,monospace";
+  ctx.fillText((rate>=0?"▲":"▼")+" "+won(Math.abs(diff))+"  "+(rate>=0?"+":"-")+Math.abs(rate).toFixed(2)+"%",
+    L.x+pw+12,L.mob?64:72);
+  ctx.fillStyle="#39414f"; ctx.font="500 9px ui-monospace,monospace";
+  ctx.fillText("전일 종가 "+won(G.p0)+" 대비",L.x+pw+12,L.mob?80:92);
+
+  if(G.msgT>0){
+    ctx.globalAlpha=Math.min(1,G.msgT/0.5);
+    ctx.fillStyle="#5c6577"; ctx.font="500 12px 'Pretendard',sans-serif";
+    ctx.textAlign="right"; ctx.fillText(G.msg,L.mob?W-L.x:L.x+L.w,L.mob?80:52);
+    ctx.textAlign="left"; ctx.globalAlpha=1;
+  }
+  // 봉 진행
+  const by=L.mob?L.plotTop-10:L.plotTop-16, bwid=L.mob?W-L.x*2:L.w;
+  ctx.fillStyle="#ffffff0a"; ctx.fillRect(L.x,by,bwid,3);
+  ctx.fillStyle="#ffffff26"; ctx.fillRect(L.x,by,bwid*(G.ct/PERIOD),3);
+}
+
+function power(){
+  const ph=1/(1+G.heat*K_IMPULSE), pp=G.pot>0?POT_MULT:1;
+  return {ph,pp,val:ph*G.combo*pp};
+}
+
+function statsMobile(){
+  const x=L.x,w=W-L.x*2,y=L.statY;
+  ctx.fillStyle="#11151e"; ctx.fillRect(x,y,w,L.statH);
+  ctx.strokeStyle="#1b2130"; ctx.lineWidth=1; ctx.strokeRect(x+.5,y+.5,w-1,L.statH-1);
+  const a=asset(), P=power();
+  const cw=w/3;
+  const cell=(i,k,v,c,big)=>{
+    const cx=x+cw*(i%3)+10, cy=y+16+Math.floor(i/3)*34;
+    ctx.textAlign="left"; ctx.fillStyle="#4a5468"; ctx.font="500 9px ui-monospace,monospace";
+    ctx.fillText(k,cx,cy);
+    ctx.fillStyle=c||"#e8ecf4"; ctx.font=(big?"700 15px":"600 13px")+" ui-monospace,monospace";
+    ctx.fillText(v,cx,cy+16);
+  };
+  cell(0,"총자산",money(a),a>=START_CASH?"#ff5a5a":"#4d8dff",1);
+  cell(1,"보유",G.sh?won(G.sh)+"주":"—");
+  cell(2,"평단",G.sh?won(G.avg):"—","#ffc247");
+  const pl=G.sh?G.sh*G.p-G.avg*G.sh:0;
+  cell(3,"평가손익",G.sh?(pl>=0?"+":"")+money(pl):"—",G.sh?(pl>=0?"#ff5a5a":"#4d8dff"):"#5c6577");
+  cell(4,"클릭 파워","×"+(P.val>=10?P.val.toFixed(0):P.val.toFixed(2)),G.pot>0?"#d3a8ff":"#e8ecf4",1);
+  const h=Math.min(1,G.heat/HMAX);
+  cell(5,"세력",h>0.66?"과열":h>0.33?"경계":"한산",h>0.66?"#ff4d4d":h>0.33?"#ffc247":"#5fe3a1");
+  // 세력 게이지
+  const gx=x+cw*2+10, gy=y+16+34+6;
+  ctx.fillStyle="#ffffff0d"; ctx.fillRect(gx,gy,cw-24,4);
+  ctx.fillStyle=h>0.66?"#ff4d4d":h>0.33?"#ffc247":"#5fe3a1";
+  ctx.fillRect(gx,gy,(cw-24)*h,4);
+  // 무결성
+  ctx.fillStyle="#ffffff10"; ctx.fillRect(x+10,y+L.statH-12,w-20,4);
+  ctx.fillStyle=G.hp>35?"#5fe3a1":"#ff6b81"; ctx.fillRect(x+10,y+L.statH-12,(w-20)*(G.hp/100),4);
+}
+
+function panel(){
+  const x=L.panelX,y=20,w=L.panelW;
+  ctx.fillStyle="#11151e"; ctx.fillRect(x,y,w,H-40);
+  ctx.strokeStyle="#1b2130"; ctx.lineWidth=1; ctx.strokeRect(x+.5,y+.5,w-1,H-41);
+  let cy=y+30;
+  const row=(k,v,c,big)=>{
+    ctx.textAlign="left"; ctx.fillStyle="#4a5468"; ctx.font="500 10px ui-monospace,monospace";
+    ctx.fillText(k,x+18,cy);
+    ctx.textAlign="right"; ctx.fillStyle=c||"#e8ecf4";
+    ctx.font=(big?"700 20px":"600 14px")+" ui-monospace,monospace";
+    ctx.fillText(v,x+w-18,cy+(big?4:2)); cy+=big?38:26;
+  };
+  const sep=()=>{cy+=8;ctx.strokeStyle="#1b2130";ctx.beginPath();
+    ctx.moveTo(x+18,cy-12);ctx.lineTo(x+w-18,cy-12);ctx.stroke()};
+  const a=asset();
+  row("총자산",money(a),a>=START_CASH?"#ff5a5a":"#4d8dff",1);
+  row("수익률",((a/START_CASH-1)*100).toFixed(1)+"%",a>=START_CASH?"#ff7a7a":"#5a9dff");
+  sep();
+  row("현금",money(G.cash));
+  row("보유수량",G.sh?won(G.sh)+"주":"—");
+  row("평균단가",G.sh?won(G.avg)+"원":"—","#ffc247");
+  if(G.sh){
+    const pl=G.sh*G.p-G.avg*G.sh, pr=pl/(G.avg*G.sh)*100;
+    row("평가손익",(pl>=0?"+":"")+money(pl),pl>=0?"#ff5a5a":"#4d8dff");
+    row("수익률",(pr>=0?"+":"")+pr.toFixed(2)+"%",pr>=0?"#ff7a7a":"#5a9dff");
+  }else{row("평가손익","—");row("수익률","—")}
+  sep();
+  const h=Math.min(1,G.heat/HMAX);
+  ctx.textAlign="left"; ctx.fillStyle="#4a5468"; ctx.font="500 10px ui-monospace,monospace";
+  ctx.fillText("세력 개입",x+18,cy);
+  ctx.textAlign="right"; ctx.fillStyle=h>0.66?"#ff4d4d":h>0.33?"#ffc247":"#5fe3a1";
+  ctx.font="700 14px ui-monospace,monospace";
+  ctx.fillText(h>0.66?"과열":h>0.33?"경계":"한산",x+w-18,cy+2);
+  cy+=12;
+  ctx.fillStyle="#ffffff0d"; ctx.fillRect(x+18,cy,w-36,6);
+  ctx.fillStyle=h>0.66?"#ff4d4d":h>0.33?"#ffc247":"#5fe3a1";
+  ctx.fillRect(x+18,cy,(w-36)*h,6);
+  ctx.textAlign="right"; ctx.font="500 9px ui-monospace,monospace";
+  ctx.fillStyle=(G.t-G.lastClick>HEAT_IDLE&&G.heat>0.02)?"#5fe3a1":"#4a5468";
+  if(G.heat>0.02) ctx.fillText((G.t-G.lastClick>HEAT_IDLE)?"이탈 중":"손 떼야 빠짐",x+w-18,cy+18);
+  cy+=30;
+  row("하락 압력",G.heat>0.05?"-"+(BLEED_HEAT*G.heat*100).toFixed(1)+"%/초":"없음",
+      G.heat>0.05?"#ff6b6b":"#5fe3a1");
+  const P=power();
+  ctx.textAlign="left"; ctx.fillStyle="#4a5468"; ctx.font="500 10px ui-monospace,monospace";
+  ctx.fillText("클릭 파워",x+18,cy);
+  ctx.textAlign="right"; ctx.fillStyle=G.pot>0?"#d3a8ff":"#e8ecf4";
+  ctx.font="700 20px ui-monospace,monospace";
+  ctx.fillText("×"+(P.val>=10?P.val.toFixed(0):P.val.toFixed(2)),x+w-18,cy+5);
+  cy+=22;
+  ctx.textAlign="right"; ctx.font="500 9px ui-monospace,monospace"; ctx.fillStyle="#4a5468";
+  ctx.fillText("열기 "+(P.ph*100).toFixed(0)+"% × 연타 "+G.combo.toFixed(2)+
+    (G.pot>0?" × 각성제 "+POT_MULT:""),x+w-18,cy);
+  cy+=20;
+  row("1클릭당","+"+won(G.p*IMPULSE*P.val)+"원 ("+G.cps.toFixed(1)+"/s)",G.pot>0?"#d3a8ff":"#8b94a8");
+  row("각성제",G.pot>0?"×"+POT_MULT+" "+G.pot.toFixed(1)+"초":G.potCd>0?"대기 "+G.potCd.toFixed(1)+"초":"사용 가능",
+      G.pot>0?"#d3a8ff":G.potCd>0?"#5c6577":"#b56bff");
+  row("자동매수봇",!G.bot?"미보유":G.botOn?"가동 "+BOT_CPS+"/초":"정지",
+      !G.bot?"#39414f":G.botOn?"#ffc247":"#5c6577");
+  row("최고 자산",money(G.peak),"#8b94a8");
+  ctx.fillStyle="#ffffff10"; ctx.fillRect(x+18,H-56,w-36,4);
+  ctx.fillStyle=G.hp>35?"#5fe3a1":"#ff6b81"; ctx.fillRect(x+18,H-56,(w-36)*(G.hp/100),4);
+  ctx.textAlign="right"; ctx.fillStyle="#2b3240"; ctx.font="500 9px ui-monospace,monospace";
+  ctx.fillText("B매수 S매도 A봇 D각성제 · R 처음부터",x+w-18,H-32);
+}
+
+function buttons(){
+  for(const b of BTN()){
+    let on,bg,ed,tx,sub="";
+    if(b.key==="buy"){on=G.sh===0&&G.cash>G.p;bg="#2a1620";ed="#ff4d4d";tx="#ff6b6b"}
+    else if(b.key==="sell"){on=G.sh>0;bg="#141c2c";ed="#3d7dff";tx="#5a9dff"}
+    else if(b.key==="bot"){
+      if(!G.bot){on=G.cash>=BOT_COST;bg="#2a2413";ed="#ffc247";tx="#ffc247";
+        if(!on) sub="현금 "+money(BOT_COST)+" 필요"}
+      else{on=true;bg=G.botOn?"#2a2413":"#161a22";ed=G.botOn?"#ffc247":"#39414f";
+        tx=G.botOn?"#ffc247":"#5c6577"}
+    }
+    else{on=G.pot>0||G.potCd<=0;bg=G.pot>0?"#241534":"#1a1424";
+      ed=G.pot>0?"#b56bff":"#6b4a99";tx=G.pot>0?"#d3a8ff":"#b56bff";
+      if(G.pot<=0) sub=on?"손+봇 전부 ×"+POT_MULT:"재사용 대기"}
+    ctx.fillStyle=on?bg:"#12151d"; ctx.fillRect(b.x,b.y,b.w,b.h);
+    ctx.strokeStyle=on?ed:"#1b2130"; ctx.lineWidth=1.4;
+    ctx.strokeRect(b.x+.7,b.y+.7,b.w-1.4,b.h-1.4);
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillStyle=on?tx:"#333b4a";
+    ctx.font="700 "+(L.mob?15:15)+"px 'Pretendard',sans-serif";
+    ctx.fillText(b.label,b.x+b.w/2,b.y+b.h/2+(sub?-6:1));
+    if(sub){ctx.font="500 9px ui-monospace,monospace";ctx.fillStyle=on?ed+"aa":"#333b4a";
+      ctx.fillText(sub,b.x+b.w/2,b.y+b.h/2+10)}
+    ctx.textBaseline="alphabetic";
+  }
+}
+
+function bustScreen(){
+  ctx.fillStyle="#0b0e14e0"; ctx.fillRect(0,0,W,H);
+  ctx.textAlign="center";
+  ctx.fillStyle="#4d8dff"; ctx.font="800 "+(L.mob?32:40)+"px 'Pretendard',sans-serif";
+  ctx.fillText("파산",W/2,H/2-14);
+  ctx.fillStyle="#6b7488"; ctx.font="500 13px 'Pretendard',sans-serif";
+  ctx.fillText("최고 자산 "+money(G.peak)+" · 거래 "+G.trades+"회 · 각성제 "+G.pots+"회",W/2,H/2+18);
+  ctx.fillStyle="#39414f"; ctx.font="500 12px ui-monospace,monospace";
+  ctx.fillText(L.mob?"화면을 두 번 탭하면 다시 시작":"R 키로 다시",W/2,H/2+46);
+}
+
+let last=performance.now(), shown=false;
+function loop(now){
+  const dt=Math.min((now-last)/1000,0.05); last=now;
+  try{ update(dt); draw(); }
+  catch(err){
+    if(!shown){shown=true;console.error(err)}
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+    ctx.fillStyle="#0b0e14";ctx.fillRect(0,0,W,H);
+    ctx.textAlign="center";ctx.fillStyle="#ff6b81";
+    ctx.font="700 16px 'Pretendard',sans-serif";
+    ctx.fillText("오류 — 다시 시작하세요",W/2,H/2);
+  }
+  requestAnimationFrame(loop);
+}
+addEventListener("visibilitychange",()=>{ if(document.hidden) save(); });
+addEventListener("pagehide",save);
+addEventListener("beforeunload",save);
+
+if(load()) { G.msg="이어서 진행합니다"; G.msgT=3.0; }
+requestAnimationFrame(loop);
+})();
+
+</script>
+</body>
+</html>
