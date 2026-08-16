@@ -39,7 +39,7 @@ let W=0,H=0,DPR=1,L={};
 function layout(){
   const mob = W<760;
   if(mob){
-    const headH=104, btnH=52, btnGap=8, statH=104, pad=10;
+    const headH=104, btnH=52, btnGap=8, statH=122, pad=10;
     const btnBlock=btnH*2+btnGap;
     L={mob:true, x:pad, w:W-pad*2-58,   // 우측 58px 은 가격 눈금·현재가 태그 자리
        plotTop:headH, plotBot:H-(btnBlock+statH+pad*2+18),
@@ -78,7 +78,8 @@ const NOISE=0.35, COMBO_W=0.38;
    손 떼면 열기가 35초에 걸쳐 빠진다
    방치하면 하락압력이 0 → 그냥 랜덤워크 (6분 뒤 대략 1.0만~1.7만)
    6분 기준: 사이클 3.1억 / 존버 1.1억 / 무행동 1.0억 / 무지성클릭 0.27억 */
-const HEAT_CLICK=0.003;   // 클릭 1회당 유입
+const HEAT_CLICK=0.003;   // 클릭 1회당 유입 (기본값)
+const HEAT_POW=0.3;       // 클릭이 셀수록 세력도 빨리 붙는다 (파워^0.3 배)
 const HEAT_GAP  =0.30;    // 적정가 대비 괴리에 비례해 유입
 const HEAT_COOL =0.045;   // 냉각 계수 — 손을 떼야만 빠진다
 const COOL_B=0.8, COOL_S=0.9;   // 이탈속도 = HEAT_COOL*(COOL_B + heat*COOL_S)
@@ -328,7 +329,8 @@ function pump(x,y){
   G.v+=G.p*eff*G.combo;
   G.streak=(G.t-G.lastClick<COMBO_W)?Math.min(G.streak+1,24):0;
   G.lastClick=G.t; G.cpsBuf.push(G.t);
-  G.heat=Math.min(HMAX,G.heat+HEAT_CLICK);
+  // 세게 누를수록 눈에 띈다 — 각성제 중엔 열기도 그만큼 빨리 찬다
+  G.heat=Math.min(HMAX,G.heat+HEAT_CLICK*Math.pow(G.combo*(G.pot>0?POT_MULT:1),HEAT_POW));
   G.rings.push({x,y,age:0,pot:G.pot>0});
   G.pops.push({x,y:y-12,age:0,txt:"+"+won(G.p*eff*G.combo),c:G.pot>0?"#c98bff":"#ff7a7a",big:0});
 }
@@ -624,11 +626,11 @@ function statsMobile(){
   const a=asset(), P=power();
   const cw=w/3;
   const cell=(i,k,v,c,big)=>{
-    const cx=x+cw*(i%3)+10, cy=y+16+Math.floor(i/3)*34;
-    ctx.textAlign="left"; ctx.fillStyle="#4a5468"; ctx.font="500 9px ui-monospace,monospace";
+    const cx=x+cw*(i%3)+11, cy=y+19+Math.floor(i/3)*42;
+    ctx.textAlign="left"; ctx.fillStyle="#5a6478"; ctx.font="600 11px 'Pretendard',sans-serif";
     ctx.fillText(k,cx,cy);
-    ctx.fillStyle=c||"#e8ecf4"; ctx.font=(big?"700 15px":"600 13px")+" ui-monospace,monospace";
-    ctx.fillText(v,cx,cy+16);
+    ctx.fillStyle=c||"#e8ecf4"; ctx.font=(big?"700 18px":"700 16px")+" ui-monospace,monospace";
+    ctx.fillText(v,cx,cy+20);
   };
   cell(0,"총자산",money(a),a>=START_CASH?"#ff5a5a":"#4d8dff",1);
   cell(1,"보유",G.sh?won(G.sh)+"주":"—");
@@ -638,14 +640,14 @@ function statsMobile(){
   cell(4,"클릭 파워","×"+(P.val>=10?P.val.toFixed(0):P.val.toFixed(2)),G.pot>0?"#d3a8ff":"#e8ecf4",1);
   const h=Math.min(1,G.heat/HMAX);
   cell(5,"세력",h>0.66?"과열":h>0.33?"경계":"한산",h>0.66?"#ff4d4d":h>0.33?"#ffc247":"#5fe3a1");
-  // 세력 게이지
-  const gx=x+cw*2+10, gy=y+16+34+6;
-  ctx.fillStyle="#ffffff0d"; ctx.fillRect(gx,gy,cw-24,4);
+  // 세력 게이지 — 값 아래로 내려 글자와 겹치지 않게
+  const gx=x+cw*2+11, gy=y+19+42+28;
+  ctx.fillStyle="#ffffff0d"; ctx.fillRect(gx,gy,cw-26,5);
   ctx.fillStyle=h>0.66?"#ff4d4d":h>0.33?"#ffc247":"#5fe3a1";
-  ctx.fillRect(gx,gy,(cw-24)*h,4);
+  ctx.fillRect(gx,gy,(cw-26)*h,5);
   // 무결성
-  ctx.fillStyle="#ffffff10"; ctx.fillRect(x+10,y+L.statH-12,w-20,4);
-  ctx.fillStyle=G.hp>35?"#5fe3a1":"#ff6b81"; ctx.fillRect(x+10,y+L.statH-12,(w-20)*(G.hp/100),4);
+  ctx.fillStyle="#ffffff10"; ctx.fillRect(x+11,y+L.statH-11,w-22,5);
+  ctx.fillStyle=G.hp>35?"#5fe3a1":"#ff6b81"; ctx.fillRect(x+11,y+L.statH-11,(w-22)*(G.hp/100),5);
 }
 
 function panel(){
