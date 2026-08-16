@@ -95,8 +95,27 @@ const K_RESTORE=0.6, K_IMPULSE=3.0;
    과열 상태(열기 3.2)의 클릭 효율은 10% — 눌러봐야 소용없다. */
 const GAP_MAX=0.14, GAP_K=1.5, WALL=25;
 /* 종목 */
-const VERSION="v0.1.2";
-const TICKER="멘비디아", CODE="045210", SHARES_OUT=1200000;
+const VERSION="v0.2.1";
+/* 종목 사다리 — 시총이 10배씩 커진다.
+   시총이 크면 더 많은 자본을 소화하지만 그만큼 밀어올리기 무겁다. */
+/* 종목 사다리 — 시총을 현실 규모에 맞췄다.
+   코스닥 초소형주 → 중견기업 → 게임 대장주 → 국내 1위 → 글로벌 시총 1위
+   ACTIVE 로 몇 단계까지 열지 조절한다 (지금은 3단계까지 실험 중). */
+const ALL_STOCKS=[
+  {n:"대성정밀", c:"094820", p:2450,   so:4.08e6,  d:"코스닥 소형주"},   // 100억
+  {n:"한빛산업", c:"158430", p:18500,  so:2.70e7,  d:"중견기업"},        // 5,000억
+  {n:"낵슨",     c:"225570", p:24500,  so:8.16e8,  d:"게임 대장주"},     // 20조
+  {n:"삼상전자", c:"005935", p:84000,  so:5.95e9,  d:"국내 시총 1위"},   // 500조
+  {n:"멘비디아", c:"NVDX",   p:250000, so:1.60e10, d:"글로벌 시총 1위"}, // 4,000조
+];
+const ACTIVE=3;
+const STOCKS=ALL_STOCKS.slice(0,ACTIVE);
+const MAX_STAKE=0.8;      // 한 종목에 넣을 수 있는 최대 = 시총의 80%
+const IMPACT_EXP=1.7;     // 체결 충격은 비중의 1.7제곱 — 소액은 거의 공짜, 거액만 무겁다
+const IMPACT_K=0.39;      // 한도(80%)에서 상한 15%, 10% 비중이면 1% 남짓
+const SELL_K=0.20, SELL_EXP=1.2;   // 매도는 완만하게 (못 파는 고통은 넣지 않는다)
+const ACQ_COST=0.5;       // 인수가 = 시총의 50% (경영권 확보 후 종잣돈이 절반 남는다)
+const DIV_RATE=0.03;      // 인수한 기업이 초당 시총의 3% 를 벌어다 준다
 const FEE_BUY=0.00015, FEE_SELL=0.00015, TAX=0.0018;
 const IMPACT=1.5;         // 주문금액/시총 대비 체결 충격 배수
 const START_CASH=1e8, BUST=1e6;
@@ -123,7 +142,7 @@ function shareURL(){
 }
 function shareText(){
   const a=asset();
-  return "작전주 — "+TICKER+"\n"+
+  return "작전주 — "+stock().n+"\n"+
     "최고 자산 "+money(G.peak)+" (시작 "+money(START_CASH)+")\n"+
     "현재 "+money(a)+" · 거래 "+G.trades+"회 · 각성제 "+G.pots+"회\n"+
     "당신은 얼마까지 벌 수 있나요?";
@@ -182,6 +201,7 @@ function save(){
       open:G.open,hi:G.hi,lo:G.lo,bars:G.bars.slice(-MAXBARS),
       heat:G.heat,cash:G.cash,sh:G.sh,avg:G.avg,hp:G.hp,
       peak:G.peak,bust:G.bust,trades:G.trades,
+      stage:G.stage,acqTotal:G.acqTotal,acquired:G.acquired,ending:G.ending,
       bot:G.bot,botOn:G.botOn,potOwned:G.potOwned,pot:G.pot,potCd:G.potCd,pots:G.pots,
       lo_v:G.lo_v,hi_v:G.hi_v
     }));
@@ -197,8 +217,10 @@ function load(){
       open:d.open,hi:d.hi,lo:d.lo,bars:Array.isArray(d.bars)?d.bars:[],
       heat:d.heat,cash:d.cash,sh:d.sh,avg:d.avg,hp:d.hp,
       peak:d.peak,bust:d.bust,trades:d.trades,
-      bot:d.bot,botOn:d.botOn,potOwned:!!d.potOwned,pot:d.pot,potCd:d.potCd,pots:d.pots,
+      stage:d.stage|0,acqTotal:d.acqTotal||0,acquired:Array.isArray(d.acquired)?d.acquired:[],
+      ending:!!d.ending,bot:d.bot,botOn:d.botOn,potOwned:!!d.potOwned,pot:d.pot,potCd:d.potCd,pots:d.pots,
       lo_v:d.lo_v,hi_v:d.hi_v});
+    G.income=(G.acqTotal||0)*DIV_RATE;
     G.lastClick=G.t-99;
     return true;
   }catch(e){ saveOK=false; return false; }
@@ -206,19 +228,50 @@ function load(){
 function wipe(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
 
 let G;
-function reset(){
-  const p0=12500;
+function reset(stage){
+  const st=STOCKS[Math.min(stage||0,STOCKS.length-1)];
+  const p0=st.p;
   G={p:p0,p0:p0,fair:p0,v:0,t:0,ct:0,open:p0,hi:p0,lo:p0,
      bars:[],rings:[],pops:[],flash:0,shake:0,
      streak:0,lastClick:-9,combo:1,cpsBuf:[],cps:0,
      heat:0, cash:START_CASH, sh:0, avg:0,
      lo_v:p0*0.9,hi_v:p0*1.1, peak:START_CASH, msg:"",msgT:0,
      bust:false, trades:0, bot:false, botOn:false, botAcc:0, potOwned:false, pot:0, potCd:0, pots:0,
-     toast:"", toastT:0, confirmT:0};
+     toast:"", toastT:0, confirmT:0,
+     stage:stage||0, acqTotal:0, acquired:[], income:0, ending:false};
 }
 reset();
-function newGame(){ reset(); wipe(); }
+function newGame(){ reset(0); wipe(); }
+function acquire(){
+  if(!canAcquire()) return;
+  const st=stock(), cap=mcap(), cost=cap*ACQ_COST;
+  if(G.cash<cost) return;
+  G.cash-=cost;
+  G.acqTotal+=cap;
+  G.acquired.push({n:st.n,cap:cap});
+  G.income=G.acqTotal*DIV_RATE;
+  G.pops.push({x:L.x+L.w*0.5,y:(L.plotTop+L.plotBot)*0.42,age:0,
+    txt:st.n+" 인수",c:"#5fe3a1",big:1});
+  G.flash=0.6; G.shake=10;
+  if(G.stage>=STOCKS.length-1){ G.ending=true; G.msg="시장 전체를 손에 넣었다"; G.msgT=6; return; }
+  // 다음 종목으로
+  const keep=G.cash, cash2=keep, acq=G.acquired.slice(), tot=G.acqTotal;
+  const bot=G.bot, botOn=G.botOn, potOwned=G.potOwned, pots=G.pots, trades=G.trades, peak=G.peak;
+  reset(G.stage+1);
+  G.cash=cash2; G.acquired=acq; G.acqTotal=tot; G.income=tot*DIV_RATE;
+  G.bot=bot; G.botOn=botOn; G.potOwned=potOwned; G.pots=pots; G.trades=trades;
+  G.peak=Math.max(peak,asset());
+  G.msg=stock().n+" 진입 · 시총 "+money(mcap()); G.msgT=4;
+}
 const asset=()=>G.cash+G.sh*G.p;
+const stock=()=>STOCKS[Math.min(G.stage,STOCKS.length-1)];
+/* 시총은 기준가 기준으로 고정한다.
+   현재가로 계산하면 주가를 폭락시켜 헐값에 인수하는 구멍이 생긴다.
+   유동성은 회사 규모에 달린 것이지 오늘 주가에 달린 게 아니다. */
+const mcap=()=>stock().p*stock().so;
+const stake=()=>asset()/Math.max(1,mcap());          // 내 자산 / 시총
+const buyCap=()=>mcap()*MAX_STAKE;                    // 이 종목이 소화할 수 있는 금액
+const canAcquire=()=>!G.ending&&asset()>=mcap()&&G.sh===0;
 
 /* 어떤 이유로든 수치가 깨지면 즉시 복구하고 무엇이 깨졌는지 남긴다 */
 const SANE={p:12500,p0:12500,fair:12500,v:0,t:0,ct:0,open:12500,hi:12500,lo:12500,
@@ -242,20 +295,34 @@ function sanitize(){
 const won=(n)=>Math.round(n).toLocaleString("ko-KR");
 const clock=(sec)=>{const m=Math.floor(sec/60),x=Math.floor(sec%60);
   return m+":"+String(x).padStart(2,"0")};
+function unitNum(v){
+  const a=Math.abs(v);
+  return a>=1000?Math.round(v).toLocaleString():a>=100?v.toFixed(0):a>=10?v.toFixed(1):v.toFixed(2);
+}
 function money(n){
   const a=Math.abs(n);
-  if(a>=1e8) return (n/1e8).toFixed(2)+"억";
-  if(a>=1e4) return Math.round(n/1e4).toLocaleString()+"만";
+  if(a>=1e16) return unitNum(n/1e16)+"경";
+  if(a>=1e12) return unitNum(n/1e12)+"조";
+  if(a>=1e8)  return unitNum(n/1e8)+"억";
+  if(a>=1e4)  return Math.round(n/1e4).toLocaleString()+"만";
   return won(n);
 }
 
 /* ── 매매 ── */
-function impactOf(value){ return Math.min(0.25, value/(G.p*SHARES_OUT)*IMPACT); }
+function buyImpact(value){
+  const r=Math.max(0,value/Math.max(1,mcap()));
+  return Math.min(0.15, IMPACT_K*Math.pow(r,IMPACT_EXP));
+}
+function sellImpact(value){
+  const r=Math.max(0,value/Math.max(1,mcap()));
+  return Math.min(0.12, SELL_K*Math.pow(r,SELL_EXP));
+}
 function buyAll(){
   if(G.bust||G.sh>0||G.cash<G.p) return;
-  const imp=impactOf(G.cash);
+  const use=Math.min(G.cash,buyCap());     // 시총이 소화할 수 있는 만큼만
+  const imp=buyImpact(use);
   const fill=G.p*(1+imp/2);
-  const n=Math.floor(G.cash/(fill*(1+FEE_BUY)));
+  const n=Math.floor(use/(fill*(1+FEE_BUY)));
   if(n<1) return;
   const cost=n*fill*(1+FEE_BUY);
   G.cash-=cost; G.sh=n; G.avg=cost/n;
@@ -266,7 +333,7 @@ function buyAll(){
 }
 function sellAll(){
   if(G.bust||G.sh<1) return;
-  const val=G.sh*G.p, imp=impactOf(val);
+  const val=G.sh*G.p, imp=sellImpact(val);
   const fill=G.p*(1-imp/2);
   const gross=G.sh*fill, net=gross*(1-FEE_SELL-TAX);
   const pl=net-G.avg*G.sh;
@@ -316,6 +383,12 @@ const BTN=()=>{
     y:L.btnY+Math.floor(i/cols)*(L.btnH+L.btnGap),
     w:bw,h:L.btnH,label,key}));
 };
+function acqRect(){
+  if(!canAcquire()) return null;
+  const w=Math.min(L.w-20,300), h=L.mob?48:44;
+  return {x:L.x+(L.w-w)/2, y:L.plotTop+(L.mob?54:64), w:w, h:h};
+}
+const inAcq=(x,y)=>{const r=acqRect(); return !!r&&x>=r.x&&x<=r.x+r.w&&y>=r.y&&y<=r.y+r.h};
 function shareRect(){
   if(G.bust) return {x:W/2-90,y:H/2+64,w:180,h:44,big:true};
   if(L.mob)  return {x:W-L.x-58,y:44,w:58,h:26};
@@ -351,6 +424,7 @@ function tap(x,y){
     else drink();
     return;
   }
+  if(inAcq(x,y)){ acquire(); return; }
   if(inShare(x,y)){ share(); return; }
   if(inReset(x,y)){
     if(G.confirmT>0){ newGame(); toast("처음부터 시작합니다"); }
@@ -358,7 +432,7 @@ function tap(x,y){
     return;
   }
   if(G.bust){ const n=Date.now(); if(n-lastTapT<400) newGame(); lastTapT=n; return; }
-  if(inChart(x,y)&&!inShare(x,y)&&!inReset(x,y)) pump(x,y);
+  if(inChart(x,y)&&!inShare(x,y)&&!inReset(x,y)&&!inAcq(x,y)) pump(x,y);
 }
 function pos(e){const r=cv.getBoundingClientRect(),q=e.touches?e.touches[0]:e;
   return [q.clientX-r.left,q.clientY-r.top]}
@@ -373,6 +447,7 @@ addEventListener("keydown",e=>{
   if(k==="s") sellAll();
   if(k==="a") G.bot?toggleBot():buyBot();
   if(k==="d") drink();
+  if(k==="i") acquire();
   if(k==="r") newGame();
 });
 
@@ -399,6 +474,7 @@ function update(dt){
     }
   }
 
+  if(G.income>0) G.cash+=G.income*dt;
   if(!G.bust){
     // 세력: 괴리가 클수록 몰려들고, 손 떼면 식는다
     const gap=Math.max(0,G.p/G.fair-1);
@@ -463,7 +539,7 @@ function draw(){
   if(L.mob) statsMobile(); else panel();
   buttons(); shareBtn(); toastDraw();
   if(G.flash>0){ctx.fillStyle="#fff";ctx.globalAlpha=G.flash*0.16;ctx.fillRect(0,0,W,H);ctx.globalAlpha=1}
-  if(G.bust) bustScreen();
+  if(G.ending) endScreen(); else if(G.bust) bustScreen();
 }
 
 function bar(x,bw,o,c,h,l,al,live){
@@ -576,6 +652,22 @@ function chart(){
     ctx.font="700 11px 'Pretendard',sans-serif";
     ctx.fillText("● 자동봇 가동",L.x+4,L.plotTop+14); ctx.globalAlpha=1;
   }
+  // 인수 배너
+  {
+    const r=acqRect();
+    if(r){
+      ctx.globalAlpha=0.9+0.1*Math.sin(G.t*4);
+      rrect(r.x,r.y,r.w,r.h,10); ctx.fillStyle="#12301f"; ctx.fill();
+      ctx.strokeStyle="#5fe3a1"; ctx.lineWidth=1.8; ctx.stroke();
+      ctx.textAlign="center"; ctx.textBaseline="middle";
+      ctx.fillStyle="#5fe3a1"; ctx.font="800 16px 'Pretendard',sans-serif";
+      ctx.fillText(stock().n+" 인수",r.x+r.w/2,r.y+r.h/2-7);
+      ctx.fillStyle="#7fd3ac"; ctx.font="600 11px ui-monospace,monospace";
+      ctx.fillText(money(mcap()*ACQ_COST)+" · 초당 "+money(mcap()*DIV_RATE)+" 수입",
+        r.x+r.w/2,r.y+r.h/2+11);
+      ctx.textBaseline="alphabetic"; ctx.globalAlpha=1;
+    }
+  }
   // 이펙트
   for(const r of G.rings){
     const a=1-r.age/0.45; ctx.globalAlpha=a*0.75;
@@ -595,10 +687,14 @@ function header(){
   const diff=G.p-G.p0, rate=diff/G.p0*100, col=rate>=0?"#ff5a5a":"#4d8dff";
   ctx.textAlign="left"; ctx.textBaseline="alphabetic";
   ctx.fillStyle="#e8ecf4"; ctx.font="700 "+(L.mob?17:20)+"px 'Pretendard',sans-serif";
-  ctx.fillText(TICKER,L.x,L.mob?28:34);
-  const tw=ctx.measureText(TICKER).width;
+  ctx.fillText(stock().n,L.x,L.mob?28:34);
+  const tw=ctx.measureText(stock().n).width;
   ctx.fillStyle="#39414f"; ctx.font="500 10px ui-monospace,monospace";
-  ctx.fillText(CODE,L.x+tw+10,L.mob?28:34);
+  ctx.fillText(stock().c,L.x+tw+10,L.mob?28:34);
+  if(!L.mob||W>420){
+    const cw2=ctx.measureText(stock().c).width;
+    ctx.fillStyle="#2f3747"; ctx.fillText(stock().d,L.x+tw+18+cw2,L.mob?28:34);
+  }
   ctx.textAlign="right"; ctx.fillText("경과 "+clock(G.t)+"  ·  "+VERSION,L.mob?W-L.x:L.x+L.w,L.mob?28:34);
 
   ctx.textAlign="left"; ctx.fillStyle=col;
@@ -618,7 +714,7 @@ function header(){
     ctx.textAlign="left"; ctx.globalAlpha=1;
   }
   // 봉 진행
-  const by=L.mob?L.plotTop-10:L.plotTop-16, bwid=L.mob?W-L.x*2:L.w;
+  const by=L.plotTop-5, bwid=L.mob?W-L.x*2:L.w;
   ctx.fillStyle="#ffffff0a"; ctx.fillRect(L.x,by,bwid,3);
   ctx.fillStyle="#ffffff26"; ctx.fillRect(L.x,by,bwid*(G.ct/PERIOD),3);
 }
@@ -642,7 +738,7 @@ function statsMobile(){
     ctx.fillText(v,cx,cy+20);
   };
   cell(0,"총자산",money(a),a>=START_CASH?"#ff5a5a":"#4d8dff",1);
-  cell(1,"보유",G.sh?won(G.sh)+"주":"—");
+  cell(1,"보유",G.sh?won(G.sh)+"주":(G.income>0?"+"+money(G.income)+"/s":"—"),G.sh?null:"#5fe3a1");
   cell(2,"평단",G.sh?won(G.avg):"—","#ffc247");
   const pl=G.sh?G.sh*G.p-G.avg*G.sh:0;
   cell(3,"평가손익",G.sh?(pl>=0?"+":"")+money(pl):"—",G.sh?(pl>=0?"#ff5a5a":"#4d8dff"):"#5c6577");
@@ -678,6 +774,8 @@ function panel(){
   row("수익률",((a/START_CASH-1)*100).toFixed(1)+"%",a>=START_CASH?"#ff7a7a":"#5a9dff");
   sep();
   row("현금",money(G.cash));
+  if(G.income>0) row("배당 수입","+"+money(G.income)+"/초","#5fe3a1");
+  row("매수 한도",money(buyCap()),G.cash>buyCap()?"#ffc247":"#8b94a8");
   row("보유수량",G.sh?won(G.sh)+"주":"—");
   row("평균단가",G.sh?won(G.avg)+"원":"—","#ffc247");
   if(G.sh){
@@ -807,7 +905,11 @@ function buttons(){
     ctx.strokeRect(b.x+.7,b.y+.7,b.w-1.4,b.h-1.4);
     ctx.textAlign="center"; ctx.textBaseline="middle";
     ctx.fillStyle=on?tx:"#333b4a";
-    ctx.font="700 "+(L.mob?15:15)+"px 'Pretendard',sans-serif";
+    let fs=15;                                   // 버튼이 좁으면 글자를 줄인다
+    ctx.font="700 "+fs+"px 'Pretendard',sans-serif";
+    while(fs>9&&ctx.measureText(b.label).width>b.w-14){
+      fs--; ctx.font="700 "+fs+"px 'Pretendard',sans-serif";
+    }
     ctx.fillText(b.label,b.x+b.w/2,b.y+b.h/2+(sub?-6:1));
     if(sub){ctx.font="500 9px ui-monospace,monospace";ctx.fillStyle=on?ed+"aa":"#333b4a";
       ctx.fillText(sub,b.x+b.w/2,b.y+b.h/2+10)}
@@ -815,6 +917,19 @@ function buttons(){
   }
 }
 
+function endScreen(){
+  ctx.fillStyle="#0b0e14e8"; ctx.fillRect(0,0,W,H);
+  ctx.textAlign="center";
+  ctx.fillStyle="#5fe3a1"; ctx.font="800 "+(L.mob?30:38)+"px 'Pretendard',sans-serif";
+  ctx.fillText("시장 장악",W/2,H/2-40);
+  ctx.fillStyle="#c9d2e4"; ctx.font="600 13px 'Pretendard',sans-serif";
+  ctx.fillText("인수한 기업 "+G.acquired.length+"개 · 초당 "+money(G.income)+" 수입",W/2,H/2-10);
+  ctx.fillStyle="#6b7488"; ctx.font="500 11px ui-monospace,monospace";
+  let yy=H/2+14;
+  for(const a of G.acquired.slice(-6)){
+    ctx.fillText(a.n+"  "+money(a.cap),W/2,yy); yy+=17;
+  }
+}
 function bustScreen(){
   ctx.fillStyle="#0b0e14e0"; ctx.fillRect(0,0,W,H);
   ctx.textAlign="center";
