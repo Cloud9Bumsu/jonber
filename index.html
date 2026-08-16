@@ -78,10 +78,10 @@ const NOISE=0.35, COMBO_W=0.38;
    손 떼면 열기가 35초에 걸쳐 빠진다
    방치하면 하락압력이 0 → 그냥 랜덤워크 (6분 뒤 대략 1.0만~1.7만)
    6분 기준: 사이클 3.1억 / 존버 1.1억 / 무행동 1.0억 / 무지성클릭 0.27억 */
-const HEAT_CLICK=0.009;   // 클릭 1회당 유입 (기본값) — 3배 가속
+const HEAT_CLICK=0.0045;  // 클릭 1회당 유입 (기본값)
 const HEAT_POW=0.3;       // 클릭이 셀수록 세력도 빨리 붙는다 (파워^0.3 배)
-const HEAT_GAP  =0.90;    // 적정가 대비 괴리에 비례해 유입 — 3배 가속
-const HEAT_COOL =0.135;   // 냉각 계수 — 손을 떼야만 빠진다. 3배 가속
+const HEAT_GAP  =0.45;    // 적정가 대비 괴리에 비례해 유입
+const HEAT_COOL =0.135;   // 냉각 계수 — 손을 떼야만 빠진다 (차오르는 속도의 2배로 빠진다)
 const COOL_B=0.8, COOL_S=0.9;   // 이탈속도 = HEAT_COOL*(COOL_B + heat*COOL_S)
 const HEAT_IDLE =1.2;     // 이 시간 이상 안 눌러야 냉각 시작
 const HMAX=3.2;
@@ -95,6 +95,7 @@ const K_RESTORE=0.6, K_IMPULSE=3.0;
    과열 상태(열기 3.2)의 클릭 효율은 10% — 눌러봐야 소용없다. */
 const GAP_MAX=0.14, GAP_K=1.5, WALL=25;
 /* 종목 */
+const VERSION="v0.1.2";
 const TICKER="멘비디아", CODE="045210", SHARES_OUT=1200000;
 const FEE_BUY=0.00015, FEE_SELL=0.00015, TAX=0.0018;
 const IMPACT=1.5;         // 주문금액/시총 대비 체결 충격 배수
@@ -598,7 +599,7 @@ function header(){
   const tw=ctx.measureText(TICKER).width;
   ctx.fillStyle="#39414f"; ctx.font="500 10px ui-monospace,monospace";
   ctx.fillText(CODE,L.x+tw+10,L.mob?28:34);
-  ctx.textAlign="right"; ctx.fillText("경과 "+clock(G.t),L.mob?W-L.x:L.x+L.w,L.mob?28:34);
+  ctx.textAlign="right"; ctx.fillText("경과 "+clock(G.t)+"  ·  "+VERSION,L.mob?W-L.x:L.x+L.w,L.mob?28:34);
 
   ctx.textAlign="left"; ctx.fillStyle=col;
   ctx.font="700 "+L.big+"px ui-monospace,monospace";
