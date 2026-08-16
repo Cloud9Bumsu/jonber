@@ -78,10 +78,10 @@ const NOISE=0.35, COMBO_W=0.38;
    손 떼면 열기가 35초에 걸쳐 빠진다
    방치하면 하락압력이 0 → 그냥 랜덤워크 (6분 뒤 대략 1.0만~1.7만)
    6분 기준: 사이클 3.1억 / 존버 1.1억 / 무행동 1.0억 / 무지성클릭 0.27억 */
-const HEAT_CLICK=0.003;   // 클릭 1회당 유입 (기본값)
+const HEAT_CLICK=0.009;   // 클릭 1회당 유입 (기본값) — 3배 가속
 const HEAT_POW=0.3;       // 클릭이 셀수록 세력도 빨리 붙는다 (파워^0.3 배)
-const HEAT_GAP  =0.30;    // 적정가 대비 괴리에 비례해 유입
-const HEAT_COOL =0.045;   // 냉각 계수 — 손을 떼야만 빠진다
+const HEAT_GAP  =0.90;    // 적정가 대비 괴리에 비례해 유입 — 3배 가속
+const HEAT_COOL =0.135;   // 냉각 계수 — 손을 떼야만 빠진다. 3배 가속
 const COOL_B=0.8, COOL_S=0.9;   // 이탈속도 = HEAT_COOL*(COOL_B + heat*COOL_S)
 const HEAT_IDLE =1.2;     // 이 시간 이상 안 눌러야 냉각 시작
 const HMAX=3.2;
