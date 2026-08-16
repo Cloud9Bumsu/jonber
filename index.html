@@ -102,8 +102,9 @@ const START_CASH=1e8, BUST=1e6;
 /* 자동매수봇 — 9천만을 모아야 살 수 있다.
    상시 가동하면 열기가 절대 안 식으므로 켜고 끄는 판단이 핵심이 된다. */
 const BOT_COST=9e7, BOT_CPS=5;
-/* 각성제 — 무료. 10초간 모든 클릭(손 + 봇) 파워 10배, 이후 10초 재사용 대기. */
-const POT_MULT=10, POT_DUR=10, POT_CD=10;
+/* 각성제 — 5억에 해금. 이후로는 무료.
+   10초간 모든 클릭(손 + 봇) 파워 10배, 이후 10초 재사용 대기. */
+const POT_UNLOCK=5e8, POT_MULT=10, POT_DUR=10, POT_CD=10;
 
 const UP=["존버 성공","익절은 예술","오늘 내가 워런","형들 나 좀 함","불장이다"];
 const DN=["물타기 각","이건 조정임","계좌 안 봄","장기투자니까","세력이 흔든다"];
@@ -180,7 +181,7 @@ function save(){
       open:G.open,hi:G.hi,lo:G.lo,bars:G.bars.slice(-MAXBARS),
       heat:G.heat,cash:G.cash,sh:G.sh,avg:G.avg,hp:G.hp,
       peak:G.peak,bust:G.bust,trades:G.trades,
-      bot:G.bot,botOn:G.botOn,pot:G.pot,potCd:G.potCd,pots:G.pots,
+      bot:G.bot,botOn:G.botOn,potOwned:G.potOwned,pot:G.pot,potCd:G.potCd,pots:G.pots,
       lo_v:G.lo_v,hi_v:G.hi_v
     }));
   }catch(e){ saveOK=false; }
@@ -195,7 +196,7 @@ function load(){
       open:d.open,hi:d.hi,lo:d.lo,bars:Array.isArray(d.bars)?d.bars:[],
       heat:d.heat,cash:d.cash,sh:d.sh,avg:d.avg,hp:d.hp,
       peak:d.peak,bust:d.bust,trades:d.trades,
-      bot:d.bot,botOn:d.botOn,pot:d.pot,potCd:d.potCd,pots:d.pots,
+      bot:d.bot,botOn:d.botOn,potOwned:!!d.potOwned,pot:d.pot,potCd:d.potCd,pots:d.pots,
       lo_v:d.lo_v,hi_v:d.hi_v});
     G.lastClick=G.t-99;
     return true;
@@ -211,7 +212,7 @@ function reset(){
      streak:0,lastClick:-9,combo:1,cpsBuf:[],cps:0,
      heat:0, cash:START_CASH, sh:0, avg:0,
      lo_v:p0*0.9,hi_v:p0*1.1, peak:START_CASH, msg:"",msgT:0,
-     bust:false, trades:0, bot:false, botOn:false, botAcc:0, pot:0, potCd:0, pots:0,
+     bust:false, trades:0, bot:false, botOn:false, botAcc:0, potOwned:false, pot:0, potCd:0, pots:0,
      toast:"", toastT:0, confirmT:0};
 }
 reset();
@@ -286,7 +287,13 @@ function buyBot(){
 }
 function toggleBot(){ if(G.bot&&!G.bust) G.botOn=!G.botOn; }
 function drink(){
-  if(G.bust||G.pot>0||G.potCd>0) return;
+  if(G.bust) return;
+  if(!G.potOwned){                       // 해금 (구매 직후 파산하지 않도록 여유분 요구)
+    if(G.cash < POT_UNLOCK+BUST) return;
+    G.cash-=POT_UNLOCK; G.potOwned=true;
+    G.msg="각성제 확보"; G.msgT=2.6;
+  }
+  if(G.pot>0||G.potCd>0) return;
   G.pot=POT_DUR; G.pots++;
   G.flash=0.5; G.shake=8;
   G.msg="각성제 투여"; G.msgT=2.4;
@@ -296,7 +303,8 @@ function drink(){
 /* ── 입력 ── */
 const BTN=()=>{
   const b3 = G.bot ? (G.botOn?"자동봇 ON":"자동봇 OFF") : "자동봇 "+money(BOT_COST);
-  const b4 = G.pot>0 ? "각성제 "+G.pot.toFixed(1)+"초"
+  const b4 = !G.potOwned ? "각성제 "+money(POT_UNLOCK)
+           : G.pot>0 ? "각성제 "+G.pot.toFixed(1)+"초"
            : G.potCd>0 ? "대기 "+G.potCd.toFixed(1)+"초"
            : "각성제 ×"+POT_MULT;
   const keys=[["전량 매수","buy"],["전량 매도","sell"],[b3,"bot"],[b4,"pot"]];
@@ -705,8 +713,9 @@ function panel(){
     (G.pot>0?" × 각성제 "+POT_MULT:""),x+w-18,cy);
   cy+=20;
   row("1클릭당","+"+won(G.p*IMPULSE*P.val)+"원 ("+G.cps.toFixed(1)+"/s)",G.pot>0?"#d3a8ff":"#8b94a8");
-  row("각성제",G.pot>0?"×"+POT_MULT+" "+G.pot.toFixed(1)+"초":G.potCd>0?"대기 "+G.potCd.toFixed(1)+"초":"사용 가능",
-      G.pot>0?"#d3a8ff":G.potCd>0?"#5c6577":"#b56bff");
+  row("각성제",!G.potOwned?"미보유":G.pot>0?"×"+POT_MULT+" "+G.pot.toFixed(1)+"초"
+      :G.potCd>0?"대기 "+G.potCd.toFixed(1)+"초":"사용 가능",
+      !G.potOwned?"#39414f":G.pot>0?"#d3a8ff":G.potCd>0?"#5c6577":"#b56bff");
   row("자동매수봇",!G.bot?"미보유":G.botOn?"가동 "+BOT_CPS+"/초":"정지",
       !G.bot?"#39414f":G.botOn?"#ffc247":"#5c6577");
   row("최고 자산",money(G.peak),"#8b94a8");
@@ -784,6 +793,10 @@ function buttons(){
         if(!on) sub="현금 "+money(BOT_COST)+" 필요"}
       else{on=true;bg=G.botOn?"#2a2413":"#161a22";ed=G.botOn?"#ffc247":"#39414f";
         tx=G.botOn?"#ffc247":"#5c6577"}
+    }
+    else if(!G.potOwned){
+      on=G.cash>=POT_UNLOCK+BUST; bg="#1a1424"; ed="#6b4a99"; tx="#b56bff";
+      sub=on?"손+봇 전부 ×"+POT_MULT:"현금 "+money(POT_UNLOCK+BUST)+" 필요";
     }
     else{on=G.pot>0||G.potCd<=0;bg=G.pot>0?"#241534":"#1a1424";
       ed=G.pot>0?"#b56bff":"#6b4a99";tx=G.pot>0?"#d3a8ff":"#b56bff";
