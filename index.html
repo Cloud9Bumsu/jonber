@@ -107,6 +107,65 @@ const POT_MULT=10, POT_DUR=10, POT_CD=10;
 const UP=["존버 성공","익절은 예술","오늘 내가 워런","형들 나 좀 함","불장이다"];
 const DN=["물타기 각","이건 조정임","계좌 안 봄","장기투자니까","세력이 흔든다"];
 
+/* ── 공유 ──
+   1순위: Web Share API (모바일 기본 공유창 → 카카오톡이 목록에 뜬다. 키 불필요)
+   2순위: 카카오 SDK (아래 KAKAO_KEY 를 채우면 카톡 전용 카드로 전송)
+   3순위: 클립보드 복사
+   카카오 JavaScript 키 발급: developers.kakao.com → 앱 만들기 →
+   플랫폼에 배포 주소 등록 → 요약정보의 JavaScript 키를 아래에 붙여넣기 */
+const KAKAO_KEY = "";
+
+function shareURL(){
+  try{ return location.origin+location.pathname; }catch(e){ return ""; }
+}
+function shareText(){
+  const a=asset();
+  return "존버 — "+TICKER+" 작전\n"+
+    "최고 자산 "+money(G.peak)+" (시작 "+money(START_CASH)+")\n"+
+    "현재 "+money(a)+" · 거래 "+G.trades+"회 · 각성제 "+G.pots+"회\n"+
+    "너도 해볼래?";
+}
+let kakaoReady=false;
+function initKakao(cb){
+  if(!KAKAO_KEY) return cb(false);
+  if(kakaoReady) return cb(true);
+  const sc=document.createElement("script");
+  sc.src="https://t1.kakaocdn.net/kakao_js_sdk/2.7.2/kakao.min.js";
+  sc.integrity="sha384-TiCUE00h649CAMonG018J2ujOgDKW/kVWlChEuu4jK2vxfAAD0eZxzCKakxg55G4";
+  sc.crossOrigin="anonymous";
+  sc.onload=()=>{ try{ if(!window.Kakao.isInitialized()) window.Kakao.init(KAKAO_KEY);
+    kakaoReady=true; cb(true);}catch(e){cb(false)} };
+  sc.onerror=()=>cb(false);
+  document.head.appendChild(sc);
+}
+function toast(msg){ G.toast=msg; G.toastT=2.2; }
+function share(){
+  const url=shareURL(), text=shareText();
+  if(navigator.share){
+    navigator.share({title:"존버", text:text, url:url})
+      .then(()=>toast("공유했습니다"))
+      .catch(()=>{});
+    return;
+  }
+  initKakao((ok)=>{
+    if(ok){
+      try{
+        window.Kakao.Share.sendDefault({
+          objectType:"text", text:text+"\n"+url,
+          link:{mobileWebUrl:url, webUrl:url},
+          buttons:[{title:"나도 해보기",link:{mobileWebUrl:url,webUrl:url}}]
+        });
+        return;
+      }catch(e){}
+    }
+    const full=text+"\n"+url;
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(full).then(()=>toast("복사했습니다. 붙여넣기 하세요"))
+        .catch(()=>toast("복사 실패"));
+    }else toast("공유를 지원하지 않는 환경입니다");
+  });
+}
+
 /* ── 자동 저장 ──
    아티팩트 미리보기에서는 localStorage 가 막혀 있어 조용히 넘어간다.
    실제 웹에 올리면 정상 작동한다. */
@@ -151,7 +210,8 @@ function reset(){
      streak:0,lastClick:-9,combo:1,cpsBuf:[],cps:0,
      heat:0, cash:START_CASH, sh:0, avg:0,
      lo_v:p0*0.9,hi_v:p0*1.1, peak:START_CASH, msg:"",msgT:0,
-     bust:false, trades:0, bot:false, botOn:false, botAcc:0, pot:0, potCd:0, pots:0};
+     bust:false, trades:0, bot:false, botOn:false, botAcc:0, pot:0, potCd:0, pots:0,
+     toast:"", toastT:0};
 }
 reset();
 function newGame(){ reset(); wipe(); }
@@ -160,7 +220,7 @@ const asset=()=>G.cash+G.sh*G.p;
 /* 어떤 이유로든 수치가 깨지면 즉시 복구하고 무엇이 깨졌는지 남긴다 */
 const SANE={p:12500,p0:12500,fair:12500,v:0,t:0,ct:0,open:12500,hi:12500,lo:12500,
   flash:0,shake:0,streak:0,lastClick:-9,combo:1,cps:0,heat:0,
-  cash:START_CASH,sh:0,avg:0,pot:0,potCd:0,lo_v:11250,hi_v:13750,peak:START_CASH,msgT:0,trades:0,botAcc:0,pot:0,potCd:0,pots:0};
+  cash:START_CASH,sh:0,avg:0,pot:0,potCd:0,lo_v:11250,hi_v:13750,peak:START_CASH,msgT:0,trades:0,botAcc:0,pot:0,potCd:0,pots:0,toastT:0};
 let brokeField="";
 function sanitize(){
   for(const k in SANE){
@@ -246,6 +306,13 @@ const BTN=()=>{
     y:L.btnY+Math.floor(i/cols)*(L.btnH+L.btnGap),
     w:bw,h:L.btnH,label,key}));
 };
+function shareRect(){
+  if(G.bust) return {x:W/2-90,y:H/2+64,w:180,h:44,big:true};
+  if(L.mob)  return {x:W-L.x-58,y:44,w:58,h:26};
+  return {x:L.panelX+18,y:H-84,w:L.panelW-36,h:26};
+}
+const inShare=(x,y)=>{const r=shareRect();
+  return x>=r.x&&x<=r.x+r.w&&y>=r.y&&y<=r.y+r.h};
 const inChart=(x,y)=>x>=L.x-6&&x<=L.right+L.gutter&&y>=L.plotTop-40&&y<=L.plotBot+10;
 function pump(x,y){
   if(G.bust) return;
@@ -265,8 +332,9 @@ function tap(x,y){
     else drink();
     return;
   }
+  if(inShare(x,y)){ share(); return; }
   if(G.bust){ const n=Date.now(); if(n-lastTapT<400) newGame(); lastTapT=n; return; }
-  if(inChart(x,y)) pump(x,y);
+  if(inChart(x,y)&&!inShare(x,y)) pump(x,y);
 }
 function pos(e){const r=cv.getBoundingClientRect(),q=e.touches?e.touches[0]:e;
   return [q.clientX-r.left,q.clientY-r.top]}
@@ -289,7 +357,7 @@ function update(dt){
   if(!isFinite(dt)||dt<=0) dt=1/60;
   sanitize();
   saveT+=dt; if(saveT>3){saveT=0;save()}
-  G.t+=dt; G.ct+=dt; G.msgT=Math.max(0,G.msgT-dt);
+  G.t+=dt; G.ct+=dt; G.msgT=Math.max(0,G.msgT-dt); G.toastT=Math.max(0,G.toastT-dt);
   G.flash=Math.max(0,G.flash-dt*2.4); G.shake*=Math.pow(0.002,dt);
   if(G.pot>0){ G.pot-=dt; if(G.pot<=0){G.pot=0; G.potCd=POT_CD;} }
   else if(G.potCd>0) G.potCd=Math.max(0,G.potCd-dt);
@@ -369,7 +437,7 @@ function draw(){
   ctx.restore();
   header();
   if(L.mob) statsMobile(); else panel();
-  buttons();
+  buttons(); shareBtn(); toastDraw();
   if(G.flash>0){ctx.fillStyle="#fff";ctx.globalAlpha=G.flash*0.16;ctx.fillRect(0,0,W,H);ctx.globalAlpha=1}
   if(G.bust) bustScreen();
 }
@@ -633,6 +701,29 @@ function panel(){
   ctx.fillText("B매수 S매도 A봇 D각성제 · R 처음부터",x+w-18,H-32);
 }
 
+function shareBtn(){
+  const r=shareRect();
+  ctx.fillStyle=r.big?"#1c2a1f":"#161a22";
+  ctx.fillRect(r.x,r.y,r.w,r.h);
+  ctx.strokeStyle=r.big?"#5fe3a1":"#39414f"; ctx.lineWidth=1.3;
+  ctx.strokeRect(r.x+.7,r.y+.7,r.w-1.4,r.h-1.4);
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillStyle=r.big?"#5fe3a1":"#7d8798";
+  ctx.font="700 "+(r.big?15:11)+"px 'Pretendard',sans-serif";
+  ctx.fillText(r.big?"결과 자랑하기":"공유",r.x+r.w/2,r.y+r.h/2+1);
+  ctx.textBaseline="alphabetic";
+}
+function toastDraw(){
+  if(G.toastT<=0) return;
+  ctx.globalAlpha=Math.min(1,G.toastT/0.5);
+  const tw=Math.min(W-40,260), tx=W/2-tw/2, ty=L.mob?L.plotBot-52:H-120;
+  ctx.fillStyle="#1c2430"; ctx.fillRect(tx,ty,tw,34);
+  ctx.strokeStyle="#39414f"; ctx.lineWidth=1; ctx.strokeRect(tx+.5,ty+.5,tw-1,33);
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillStyle="#c9d2e4"; ctx.font="600 12px 'Pretendard',sans-serif";
+  ctx.fillText(G.toast,W/2,ty+18);
+  ctx.textBaseline="alphabetic"; ctx.globalAlpha=1;
+}
 function buttons(){
   for(const b of BTN()){
     let on,bg,ed,tx,sub="";
@@ -668,7 +759,7 @@ function bustScreen(){
   ctx.fillStyle="#6b7488"; ctx.font="500 13px 'Pretendard',sans-serif";
   ctx.fillText("최고 자산 "+money(G.peak)+" · 거래 "+G.trades+"회 · 각성제 "+G.pots+"회",W/2,H/2+18);
   ctx.fillStyle="#39414f"; ctx.font="500 12px ui-monospace,monospace";
-  ctx.fillText(L.mob?"화면을 두 번 탭하면 다시 시작":"R 키로 다시",W/2,H/2+46);
+  ctx.fillText(L.mob?"화면을 두 번 탭하면 다시 시작":"R 키로 다시",W/2,H/2+44);
 }
 
 let last=performance.now(), shown=false;
